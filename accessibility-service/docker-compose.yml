@@ -1,0 +1,55 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./models:/app/models      # AI model weights (persistent)
+      - ./outputs:/app/outputs    # Finished VTT / MP3 files
+      - ./temp:/app/temp          # In-progress downloads (transient)
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./temp:/app/temp
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m arq app.workers.worker.WorkerSettings
+
+volumes:
+  redis_data:

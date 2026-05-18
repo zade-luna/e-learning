@@ -23,6 +23,7 @@ import {
   AlertCircle,
   BookOpen,
   ArrowLeft,
+  Headphones,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
@@ -263,6 +264,31 @@ export default function CourseDetailPage({ params: paramsPromise }: { params: Pr
                         src={getVideoUrl(currentLesson.video_url)} 
                         subtitleSrc={getSubtitleUrl(currentLesson.subtitle_url)}
                       />
+                    )}
+
+                    {/* Audio Player — shown when TTS audio has been generated */}
+                    {currentLesson?.audio_url && (
+                      <Card className="border-0 shadow-sm">
+                        <CardHeader className="pb-3">
+                          <CardTitle className="text-base flex items-center gap-2">
+                            <Headphones className="h-4 w-4 text-purple-600" aria-hidden="true" />
+                            Audio Version (AI-generated)
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <audio
+                            controls
+                            className="w-full"
+                            aria-label={`Audio version of ${currentLesson.title}`}
+                            src={getSubtitleUrl(currentLesson.audio_url)}
+                          >
+                            Your browser does not support the audio element.
+                          </audio>
+                          <p className="text-xs text-gray-500 mt-2">
+                            AI-generated spoken version of the lesson document for visually impaired students.
+                          </p>
+                        </CardContent>
+                      </Card>
                     )}
 
                     {/* Lesson Description */}

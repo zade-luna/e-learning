@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { coursesAPI, lessonsAPI } from '@/lib/api';
+import { coursesAPI, lessonsAPI, accessibilityAPI } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
+import { useAccessibilitySocket } from '@/hooks/use-accessibility-socket';
 import { RouteGuard } from '@/lib/route-guard';
 import { DashboardLayout } from '@/components/dashboard-layout-new';
 import { KeyboardShortcutsHelp } from '@/components/keyboard-shortcuts-help';
@@ -19,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { BookOpen, FileVideo, CheckCircle2, AlertCircle, Loader2, PlusCircle } from 'lucide-react';
+import { BookOpen, FileVideo, CheckCircle2, AlertCircle, Loader2, PlusCircle, Wand2, Headphones, Mic } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
 type ActiveTab = 'create-course' | 'add-lesson';
@@ -57,6 +58,32 @@ export default function UploadPage() {
   const [lessonSubmitting, setLessonSubmitting] = useState(false);
   const [lessonSuccess, setLessonSuccess] = useState('');
   const [lessonError, setLessonError] = useState('');
+
+  // AI accessibility state — tracks the most recently created lesson and any running jobs
+  const [createdLesson, setCreatedLesson] = useState<any>(null);
+  const [aiJob, setAiJob] = useState<{
+    stt: { jobId: string | null; status: string; progress: string; submitting: boolean; error: string };
+    tts: { jobId: string | null; status: string; progress: string; submitting: boolean; error: string };
+  }>({
+    stt: { jobId: null, status: '', progress: '', submitting: false, error: '' },
+    tts: { jobId: null, status: '', progress: '', submitting: false, error: '' },
+  });
+
+  // WebSocket: receive job completion events instead of polling
+  const handleJobDone = useCallback((payload: { jobId: string; jobType: 'stt' | 'tts'; status: string; url?: string; error?: string }) => {
+    setAiJob((prev) => ({
+      ...prev,
+      [payload.jobType]: {
+        ...prev[payload.jobType],
+        status: payload.status,
+        progress: payload.status === 'completed' ? '100%' : '',
+        submitting: false,
+        error: payload.error || '',
+      },
+    }));
+  }, []);
+
+  useAccessibilitySocket(user?.id, handleJobDone);
 
   useEffect(() => {
     fetchTeacherCourses();
@@ -133,6 +160,28 @@ export default function UploadPage() {
     setDocumentFile(file);
   };
 
+  // Submit an AI job and update local state (manual retry or initial auto-submit)
+  const handleGenerateAI = async (jobType: 'stt' | 'tts', lessonOverride?: any) => {
+    const lesson = lessonOverride ?? createdLesson;
+    if (!lesson) return;
+    setAiJob((prev) => ({
+      ...prev,
+      [jobType]: { jobId: null, status: 'queued', progress: '', submitting: true, error: '' },
+    }));
+    try {
+      const data: any = await accessibilityAPI.submitJob(lesson.id, jobType);
+      setAiJob((prev) => ({
+        ...prev,
+        [jobType]: { jobId: data.job_id, status: data.status, progress: '', submitting: false, error: '' },
+      }));
+    } catch (err: any) {
+      setAiJob((prev) => ({
+        ...prev,
+        [jobType]: { jobId: null, status: 'failed', progress: '', submitting: false, error: err.message || 'Failed to submit job' },
+      }));
+    }
+  };
+
   const handleLessonSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLessonError('');
@@ -156,7 +205,7 @@ export default function UploadPage() {
       const existingLessons = await lessonsAPI.getByCourse(parseInt(lessonForm.courseId)) as any[];
       const orderIndex = existingLessons.length + 1;
 
-      await lessonsAPI.create({
+      const newLesson: any = await lessonsAPI.create({
         courseId: parseInt(lessonForm.courseId),
         title: lessonForm.title.trim(),
         description: lessonForm.description.trim() || undefined,
@@ -166,7 +215,16 @@ export default function UploadPage() {
         durationMinutes: lessonForm.durationMinutes,
       });
 
-      setLessonSuccess('Lesson added successfully!');
+      setCreatedLesson(newLesson);
+      setAiJob({
+        stt: { jobId: null, status: '', progress: '', submitting: false, error: '' },
+        tts: { jobId: null, status: '', progress: '', submitting: false, error: '' },
+      });
+      setLessonSuccess('Lesson added! AI accessibility jobs are starting automatically…');
+
+      // Auto-submit AI jobs for whichever files were uploaded
+      if (newLesson.video_url) handleGenerateAI('stt', newLesson);
+      if (newLesson.document_url) handleGenerateAI('tts', newLesson);
       setLessonForm(prev => ({ ...prev, title: '', description: '', durationMinutes: 30 }));
       setVideoFile(null);
       setDocumentFile(null);
@@ -545,6 +603,113 @@ export default function UploadPage() {
                     </Button>
                   </div>
                 </form>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* AI Accessibility panel — shown after a lesson is successfully created */}
+        {createdLesson && (
+          <div>
+            <Card className="border-purple-200 shadow-lg">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-purple-900">
+                  <Wand2 className="h-5 w-5 text-purple-600" aria-hidden="true" />
+                  AI Accessibility — {createdLesson.title}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4 p-6">
+                <p className="text-sm text-gray-600">
+                  Automatically generate accessibility assets for the lesson you just uploaded.
+                  Both jobs run in the background — you can leave this page.
+                </p>
+
+                {/* STT — Video → Subtitles */}
+                {createdLesson.video_url && (
+                  <div className="flex items-center justify-between rounded-lg border border-gray-200 p-4">
+                    <div className="flex items-center gap-3">
+                      <Mic className="h-5 w-5 text-blue-600 flex-shrink-0" aria-hidden="true" />
+                      <div>
+                        <p className="font-medium text-sm text-gray-900">Generate Subtitles (STT)</p>
+                        <p className="text-xs text-gray-500">
+                          Transcribes the video using Whisper AI → .vtt subtitle file
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {aiJob.stt.status === 'completed' && (
+                        <span className="text-xs text-green-700 font-medium flex items-center gap-1">
+                          <CheckCircle2 className="h-4 w-4" /> Done
+                        </span>
+                      )}
+                      {aiJob.stt.status === 'failed' && (
+                        <span className="text-xs text-red-600">{aiJob.stt.error || 'Failed'}</span>
+                      )}
+                      {aiJob.stt.status && !['completed', 'failed', '', 'submitting'].includes(aiJob.stt.status) && (
+                        <span className="text-xs text-blue-600 flex items-center gap-1">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          {aiJob.stt.progress || aiJob.stt.status}
+                        </span>
+                      )}
+                      <Button
+                        size="sm"
+                        disabled={
+                          aiJob.stt.submitting ||
+                          ['queued', 'downloading', 'processing', 'completed'].includes(aiJob.stt.status)
+                        }
+                        onClick={() => handleGenerateAI('stt')}
+                      >
+                        {aiJob.stt.submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* TTS — Document → Audio */}
+                {createdLesson.document_url && (
+                  <div className="flex items-center justify-between rounded-lg border border-gray-200 p-4">
+                    <div className="flex items-center gap-3">
+                      <Headphones className="h-5 w-5 text-purple-600 flex-shrink-0" aria-hidden="true" />
+                      <div>
+                        <p className="font-medium text-sm text-gray-900">Generate Audio (TTS)</p>
+                        <p className="text-xs text-gray-500">
+                          Converts the document to spoken audio using Piper TTS → .mp3
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {aiJob.tts.status === 'completed' && (
+                        <span className="text-xs text-green-700 font-medium flex items-center gap-1">
+                          <CheckCircle2 className="h-4 w-4" /> Done
+                        </span>
+                      )}
+                      {aiJob.tts.status === 'failed' && (
+                        <span className="text-xs text-red-600">{aiJob.tts.error || 'Failed'}</span>
+                      )}
+                      {aiJob.tts.status && !['completed', 'failed', '', 'submitting'].includes(aiJob.tts.status) && (
+                        <span className="text-xs text-purple-600 flex items-center gap-1">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          {aiJob.tts.progress || aiJob.tts.status}
+                        </span>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={
+                          aiJob.tts.submitting ||
+                          ['queued', 'downloading', 'processing', 'completed'].includes(aiJob.tts.status)
+                        }
+                        onClick={() => handleGenerateAI('tts')}
+                      >
+                        {aiJob.tts.submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {!createdLesson.video_url && !createdLesson.document_url && (
+                  <p className="text-sm text-gray-500">No media attached to this lesson.</p>
+                )}
               </CardContent>
             </Card>
           </div>

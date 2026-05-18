@@ -1,15 +1,18 @@
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const compression = require('compression');
 const morgan = require('morgan');
 const path = require('path');
+const { Server: SocketIOServer } = require('socket.io');
 require('dotenv').config();
 
 const logger = require('./logger');
 const pool = require('./db/connection');
 
 const app = express();
+const httpServer = http.createServer(app);
 
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -59,6 +62,28 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(hpp()); // HTTP Parameter Pollution protection
 app.use(compression()); // Gzip compression for all responses
 
+// Socket.io — attached to the same HTTP server
+const io = new SocketIOServer(httpServer, {
+  cors: {
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      if (process.env.NODE_ENV !== 'production' && isDevLocalOrigin(origin)) return callback(null, true);
+      callback(new Error('Not allowed'));
+    },
+    credentials: true,
+  },
+  path: '/socket.io',
+});
+
+io.on('connection', (socket) => {
+  const userId = socket.handshake.auth?.userId;
+  if (userId) socket.join(`teacher:${userId}`);
+});
+
+// Export io instance so route handlers can emit events
+app.set('io', io);
+
 // HTTP request logging (skip /health to reduce noise)
 app.use(morgan('combined', {
   stream: { write: (msg) => logger.info(msg.trim()) },
@@ -86,6 +111,8 @@ const quizRoutes = require('./routes/quizzes');
 const feedbackRoutes = require('./routes/feedback');
 const auditRoutes = require('./routes/audit');
 const systemRoutes = require('./routes/system');
+const accessibilityRoutes = require('./routes/accessibility');
+const internalRoutes = require('./routes/internal');
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -98,6 +125,8 @@ app.use('/api/quizzes', quizRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/system', systemRoutes);
+app.use('/api/accessibility', accessibilityRoutes);
+app.use('/api/internal', internalRoutes);
 
 // Health check — public, no auth required
 app.get('/health', async (req, res) => {
@@ -133,6 +162,6 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`, { env: process.env.NODE_ENV || 'development' });
 });
