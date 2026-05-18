@@ -37,9 +37,18 @@ frontend/dist/
 # Uploads (user-generated content - usually not committed)
 backend/uploads/videos/*
 backend/uploads/subtitles/*
+backend/uploads/audio/*
+backend/uploads/documents/*
 !backend/uploads/videos/.gitkeep
 !backend/uploads/subtitles/.gitkeep
 !backend/uploads/subtitles/sample-subtitle.vtt
+!backend/uploads/audio/.gitkeep
+!backend/uploads/documents/.gitkeep
+
+# Accessibility service — model weights (large binary files, downloaded at runtime)
+accessibility-service/models/
+# Accessibility service — secrets
+accessibility-service/.env
 
 # OS files
 .DS_Store

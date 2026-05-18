@@ -1,24 +1,16 @@
 'use client';
 
-import { use, useState, useEffect } from 'react';
+import { use, useState, useEffect, useCallback } from 'react';
 import { DashboardLayout } from '@/components/dashboard-layout-new';
 import { useCommonShortcuts } from '@/hooks/use-keyboard-shortcuts';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from '@/components/ui/tooltip';
 import {
   ArrowLeft,
@@ -32,8 +24,18 @@ import {
   Plus,
   Loader2,
   HelpCircle,
+  Video,
+  Headphones,
+  Mic,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  Wand2,
 } from 'lucide-react';
-import { coursesAPI, lessonsAPI, enrollmentsAPI, quizzesAPI } from '@/lib/api';
+import { coursesAPI, lessonsAPI, enrollmentsAPI, quizzesAPI, accessibilityAPI, getServerOrigin } from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
+import { useAccessibilitySocket } from '@/hooks/use-accessibility-socket';
 import { RouteGuard } from '@/lib/route-guard';
 import { EditCourseDialog } from '@/components/dialogs/edit-course-dialog';
 import { DeleteConfirmDialog } from '@/components/dialogs/delete-confirm-dialog';
@@ -60,6 +62,17 @@ interface Lesson {
   order: number;
   description?: string;
   video_url?: string;
+  document_url?: string;
+  subtitle_url?: string;
+  audio_url?: string;
+}
+
+interface LessonJob {
+  id: number;
+  job_id: string;
+  job_type: 'stt' | 'tts';
+  status: string;
+  created_at: string;
 }
 
 interface Student {
@@ -88,9 +101,38 @@ export default function TeacherCourseDetailPage({ params }: { params: Promise<{ 
   useCommonShortcuts('teacher');
 
   const { id } = use(params);
+  const { user } = useAuth();
 
   const [course, setCourse] = useState<CourseData | null>(null);
   const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [expandedLesson, setExpandedLesson] = useState<number | null>(null);
+  const [lessonJobs, setLessonJobs] = useState<Record<number, LessonJob[]>>({});
+  const [submittingJob, setSubmittingJob] = useState<Record<string, boolean>>({});
+
+  // WebSocket: update job status in real-time when a job finishes
+  const handleJobDone = useCallback((payload: { jobId: string; jobType: 'stt' | 'tts'; lessonId: number; status: string; url?: string }) => {
+    // Update jobs list for the affected lesson
+    setLessonJobs((prev) => {
+      const jobs = prev[payload.lessonId] ?? [];
+      const updated = jobs.map((j) =>
+        j.job_id === payload.jobId ? { ...j, status: payload.status } : j
+      );
+      return { ...prev, [payload.lessonId]: updated };
+    });
+    // Update lesson media url if completed
+    if (payload.status === 'completed' && payload.url) {
+      setLessons((prev) =>
+        prev.map((l) =>
+          l.id === payload.lessonId
+            ? { ...l, [payload.jobType === 'stt' ? 'subtitle_url' : 'audio_url']: payload.url }
+            : l
+        )
+      );
+    }
+    setSubmittingJob((prev) => ({ ...prev, [`${payload.lessonId}-${payload.jobType}`]: false }));
+  }, []);
+
+  useAccessibilitySocket(user?.id, handleJobDone);
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
@@ -141,6 +183,9 @@ export default function TeacherCourseDetailPage({ params }: { params: Promise<{ 
             order: l.order_index,
             description: l.description || '',
             video_url: l.video_url || '',
+            document_url: l.document_url || '',
+            subtitle_url: l.subtitle_url || '',
+            audio_url: l.audio_url || '',
           }))
           .sort((a: Lesson, b: Lesson) => a.order - b.order)
       );
@@ -224,10 +269,47 @@ export default function TeacherCourseDetailPage({ params }: { params: Promise<{ 
           order: newLesson.order_index,
           description: newLesson.description || '',
           video_url: newLesson.video_url || '',
+          document_url: newLesson.document_url || '',
+          subtitle_url: newLesson.subtitle_url || '',
+          audio_url: newLesson.audio_url || '',
         },
       ].sort((a, b) => a.order - b.order)
     );
-    fetchCourseData(); // Refresh stats (totalLessons count)
+    fetchCourseData();
+    // Auto-submit AI jobs for new lesson
+    if (newLesson.video_url) submitAiJob(newLesson.id, 'stt');
+    if (newLesson.document_url) submitAiJob(newLesson.id, 'tts');
+  };
+
+  const fetchLessonJobs = async (lessonId: number) => {
+    try {
+      const jobs = await accessibilityAPI.getLessonJobs(lessonId) as LessonJob[];
+      setLessonJobs((prev) => ({ ...prev, [lessonId]: jobs }));
+    } catch {
+      // non-blocking
+    }
+  };
+
+  const handleToggleLesson = (lessonId: number) => {
+    setExpandedLesson((prev) => {
+      const next = prev === lessonId ? null : lessonId;
+      if (next !== null) fetchLessonJobs(next);
+      return next;
+    });
+  };
+
+  const submitAiJob = async (lessonId: number, jobType: 'stt' | 'tts') => {
+    const key = `${lessonId}-${jobType}`;
+    setSubmittingJob((prev) => ({ ...prev, [key]: true }));
+    try {
+      const data: any = await accessibilityAPI.submitJob(lessonId, jobType);
+      setLessonJobs((prev) => ({
+        ...prev,
+        [lessonId]: [{ id: Date.now(), job_id: data.job_id, job_type: jobType, status: data.status, created_at: new Date().toISOString() }, ...(prev[lessonId] ?? [])],
+      }));
+    } catch {
+      setSubmittingJob((prev) => ({ ...prev, [key]: false }));
+    }
   };
 
   const handleEditLesson = (updatedLesson: Lesson) => {
@@ -436,7 +518,7 @@ export default function TeacherCourseDetailPage({ params }: { params: Promise<{ 
             </CardContent>
           </Card>
 
-          {/* Lessons Table */}
+          {/* Lessons */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Course Content ({lessons.length} Lessons)</CardTitle>
@@ -445,68 +527,170 @@ export default function TeacherCourseDetailPage({ params }: { params: Promise<{ 
                 Add Lesson
               </Button>
             </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Order</TableHead>
-                    <TableHead>Lesson Title</TableHead>
-                    <TableHead>Duration</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {lessons.map((lesson) => (
-                    <TableRow key={lesson.id}>
-                      <TableCell className="font-medium">{lesson.order}</TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          <FileText className="h-4 w-4 text-gray-400" aria-hidden="true" />
-                          {lesson.title}
-                        </div>
-                      </TableCell>
-                      <TableCell>{lesson.duration}</TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-2">
-                          <TooltipProvider>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => setEditingLesson(lesson)}
-                                >
-                                  <Edit className="h-4 w-4" aria-hidden="true" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                <p>Edit lesson</p>
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+            <CardContent className="space-y-3">
+              {lessons.length === 0 && (
+                <p className="text-center text-gray-500 py-8">No lessons yet. Add your first lesson above.</p>
+              )}
+              {lessons.map((lesson) => {
+                const isExpanded = expandedLesson === lesson.id;
+                const jobs = lessonJobs[lesson.id] ?? [];
+                const latestStt = jobs.find((j) => j.job_type === 'stt');
+                const latestTts = jobs.find((j) => j.job_type === 'tts');
+                const sttKey = `${lesson.id}-stt`;
+                const ttsKey = `${lesson.id}-tts`;
 
-                          <TooltipProvider>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
+                return (
+                  <div key={lesson.id} className="border rounded-lg overflow-hidden">
+                    {/* Lesson header row */}
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+                      onClick={() => handleToggleLesson(lesson.id)}
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs font-mono bg-gray-200 rounded px-2 py-0.5">{lesson.order}</span>
+                        <span className="font-medium text-gray-900">{lesson.title}</span>
+                        <span className="text-xs text-gray-500">{lesson.duration}</span>
+                        {/* Media badges */}
+                        {lesson.video_url && <span className="inline-flex items-center gap-1 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-0.5"><Video className="h-3 w-3" />Video</span>}
+                        {lesson.document_url && <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5"><FileText className="h-3 w-3" />Doc</span>}
+                        {lesson.subtitle_url && <span className="inline-flex items-center gap-1 text-xs text-green-700 bg-green-50 border border-green-200 rounded px-2 py-0.5"><CheckCircle2 className="h-3 w-3" />Subtitles</span>}
+                        {lesson.audio_url && <span className="inline-flex items-center gap-1 text-xs text-purple-700 bg-purple-50 border border-purple-200 rounded px-2 py-0.5"><Headphones className="h-3 w-3" />Audio</span>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); setEditingLesson(lesson); }} aria-label="Edit lesson">
+                          <Edit className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); setDeletingLesson(lesson); }} aria-label="Delete lesson">
+                          <Trash2 className="h-4 w-4 text-red-500" />
+                        </Button>
+                        {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+                      </div>
+                    </button>
+
+                    {/* Expanded content */}
+                    {isExpanded && (
+                      <div className="p-4 space-y-5 bg-white">
+                        {lesson.description && (
+                          <p className="text-sm text-gray-600">{lesson.description}</p>
+                        )}
+
+                        {/* Video player */}
+                        {lesson.video_url && (
+                          <div className="space-y-2">
+                            <h4 className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Video className="h-4 w-4 text-blue-600" />Video</h4>
+                            <video
+                              src={`${getServerOrigin()}${lesson.video_url}`}
+                              controls
+                              className="w-full max-h-72 rounded-lg bg-black"
+                              aria-label={`Video for ${lesson.title}`}
+                            >
+                              {lesson.subtitle_url && (
+                                <track
+                                  kind="subtitles"
+                                  src={`${getServerOrigin()}${lesson.subtitle_url}`}
+                                  srcLang="en"
+                                  label="English"
+                                  default
+                                />
+                              )}
+                            </video>
+                          </div>
+                        )}
+
+                        {/* Document link */}
+                        {lesson.document_url && (
+                          <div className="space-y-2">
+                            <h4 className="text-sm font-semibold text-gray-700 flex items-center gap-2"><FileText className="h-4 w-4 text-amber-600" />Document</h4>
+                            <a
+                              href={`${getServerOrigin()}${lesson.document_url}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-2 text-sm text-blue-600 underline hover:text-blue-800"
+                            >
+                              <ExternalLink className="h-4 w-4" />
+                              Open document
+                            </a>
+                          </div>
+                        )}
+
+                        {/* Audio player */}
+                        {lesson.audio_url && (
+                          <div className="space-y-2">
+                            <h4 className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Headphones className="h-4 w-4 text-purple-600" />AI Audio</h4>
+                            <audio
+                              src={`${getServerOrigin()}${lesson.audio_url}`}
+                              controls
+                              className="w-full"
+                              aria-label={`Audio narration for ${lesson.title}`}
+                            />
+                          </div>
+                        )}
+
+                        {/* AI Accessibility jobs */}
+                        <div className="border-t pt-4">
+                          <h4 className="text-sm font-semibold text-gray-700 flex items-center gap-2 mb-3"><Wand2 className="h-4 w-4 text-purple-600" />AI Accessibility</h4>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {/* STT */}
+                            {lesson.video_url && (
+                              <div className="border rounded-lg p-3 flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2">
+                                  <Mic className="h-4 w-4 text-blue-600" />
+                                  <div>
+                                    <p className="text-xs font-medium">Generate Subtitles (STT)</p>
+                                    {latestStt ? (
+                                      <p className={`text-xs ${ latestStt.status === 'completed' ? 'text-green-600' : latestStt.status === 'failed' ? 'text-red-500' : 'text-blue-500'}`}>
+                                        {latestStt.status === 'completed' ? '✓ Done' : latestStt.status}
+                                      </p>
+                                    ) : (
+                                      <p className="text-xs text-gray-400">{lesson.subtitle_url ? '✓ Subtitle ready' : 'Not generated'}</p>
+                                    )}
+                                  </div>
+                                </div>
                                 <Button
-                                  variant="outline"
                                   size="sm"
-                                  onClick={() => setDeletingLesson(lesson)}
+                                  variant="outline"
+                                  disabled={submittingJob[sttKey] || latestStt?.status === 'queued' || latestStt?.status === 'processing'}
+                                  onClick={() => submitAiJob(lesson.id, 'stt')}
                                 >
-                                  <Trash2 className="h-4 w-4 text-red-600" aria-hidden="true" />
+                                  {submittingJob[sttKey] ? <Loader2 className="h-3 w-3 animate-spin" /> : lesson.subtitle_url ? 'Re-run' : 'Generate'}
                                 </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                <p>Delete lesson</p>
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                              </div>
+                            )}
+                            {/* TTS */}
+                            {lesson.document_url && (
+                              <div className="border rounded-lg p-3 flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2">
+                                  <Headphones className="h-4 w-4 text-purple-600" />
+                                  <div>
+                                    <p className="text-xs font-medium">Generate Audio (TTS)</p>
+                                    {latestTts ? (
+                                      <p className={`text-xs ${ latestTts.status === 'completed' ? 'text-green-600' : latestTts.status === 'failed' ? 'text-red-500' : 'text-purple-500'}`}>
+                                        {latestTts.status === 'completed' ? '✓ Done' : latestTts.status}
+                                      </p>
+                                    ) : (
+                                      <p className="text-xs text-gray-400">{lesson.audio_url ? '✓ Audio ready' : 'Not generated'}</p>
+                                    )}
+                                  </div>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={submittingJob[ttsKey] || latestTts?.status === 'queued' || latestTts?.status === 'processing'}
+                                  onClick={() => submitAiJob(lesson.id, 'tts')}
+                                >
+                                  {submittingJob[ttsKey] ? <Loader2 className="h-3 w-3 animate-spin" /> : lesson.audio_url ? 'Re-run' : 'Generate'}
+                                </Button>
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </CardContent>
           </Card>
 

@@ -681,3 +681,16 @@ export const systemAPI = {
   getTeacherStats: () => apiRequest('/system/teacher/stats'),
   getStudentStats: () => apiRequest('/system/student/stats'),
 };
+
+// Accessibility microservice API
+export const accessibilityAPI = {
+  /** Submit an STT (video → subtitles) or TTS (document → audio) job */
+  submitJob: (lessonId: number, jobType: 'stt' | 'tts') =>
+    apiRequest('/accessibility/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ lessonId, jobType }),
+    }),
+
+  /** Get all AI jobs for a specific lesson */
+  getLessonJobs: (lessonId: number) => apiRequest(`/accessibility/lessons/${lessonId}/jobs`),
+};
